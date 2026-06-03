@@ -1,6 +1,7 @@
 import sys
 import zipfile
 from extractor.config import supported_formats_message
+from extractor.exceptions import ExtractionError
 
 
 def extract_docx_with_python_docx(docx_path: str) -> str | None:
@@ -53,10 +54,9 @@ def extract_docx(docx_path: str) -> tuple[str, str]:
         return text, "zipfile-docx"
 
     print("FAILED")
-    print(
-        "\nERROR: Could not extract text from DOCX.\n"
+    raise ExtractionError(
+        "Could not extract text from DOCX.\n"
         "Install python-docx for best results:\n"
-        "  pip3 install python-docx",
-        file=sys.stderr,
+        "  pip3 install python-docx"
     )
-    sys.exit(1)
+

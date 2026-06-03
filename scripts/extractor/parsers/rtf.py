@@ -2,6 +2,7 @@ import html
 import re
 import sys
 from extractor.parsers.text import read_text_file
+from extractor.exceptions import ExtractionError
 
 
 def strip_rtf_fallback(raw: str) -> str:
@@ -16,8 +17,7 @@ def strip_rtf_fallback(raw: str) -> str:
 def extract_rtf(rtf_path: str) -> tuple[str, str]:
     raw = read_text_file(rtf_path)
     if raw is None:
-        print("ERROR: Could not read RTF file", file=sys.stderr)
-        sys.exit(1)
+        raise ExtractionError(f"Could not read RTF file: {rtf_path}")
 
     try:
         from striprtf.striprtf import rtf_to_text

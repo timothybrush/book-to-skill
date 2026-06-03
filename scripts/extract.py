@@ -7,9 +7,9 @@ Modular entrypoint wrapper.
 import os
 import sys
 
-# Ensure the parent directory of this script's directory (i.e. the repository root) 
-# is in sys.path so that the modular 'extractor' package can be imported reliably.
-sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Ensure the scripts/ directory (where the 'extractor' package lives) is in sys.path
+# so the modular package can be imported reliably regardless of the working directory.
+sys.path.insert(0, str(os.path.dirname(os.path.abspath(__file__))))
 
 from extractor.utils import main
 

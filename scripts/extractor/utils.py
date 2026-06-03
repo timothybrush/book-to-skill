@@ -7,6 +7,8 @@ import shutil
 import zipfile
 from pathlib import Path
 
+from extractor.exceptions import ExtractionError
+
 from extractor.config import (
     OUTPUT_DIR,
     OUTPUT_TEXT,
@@ -106,29 +108,42 @@ def parse_arguments(argv: list[str]) -> tuple[list[str], str, str]:
 
 
 def resolve_input_files(paths: list[str]) -> list[Path]:
-    """Resolve paths including files, directories, and glob patterns to Path objects."""
+    """Resolve paths including files, directories, and glob patterns to Path objects.
+
+    User-given order is preserved for explicit file arguments.  Expanded
+    results (directories, globs) are sorted deterministically so repeated
+    runs produce the same output.
+    """
     resolved = []
     for path_str in paths:
         # Check if it has glob wildcards
         if any(char in path_str for char in ("*", "?", "[")):
             glob_matches = glob.glob(path_str, recursive=True)
+            # Sort expanded glob results deterministically
+            expanded = []
             for match in glob_matches:
                 p = Path(match)
-                if p.is_file():
-                    resolved.append(p.resolve())
+                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    expanded.append(p.resolve())
+            expanded.sort(key=lambda x: str(x).lower())
+            resolved.extend(expanded)
         else:
             p = Path(path_str)
             if p.is_dir():
+                # Sort expanded directory results deterministically
+                dir_files = []
                 for root, _, files in os.walk(p):
                     for file in files:
                         file_path = Path(root) / file
                         if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                            resolved.append(file_path.resolve())
+                            dir_files.append(file_path.resolve())
+                dir_files.sort(key=lambda x: str(x).lower())
+                resolved.extend(dir_files)
             else:
                 # Keep even if it doesn't exist so the error check can report it
                 resolved.append(p.resolve())
-                
-    # Deduplicate while preserving order, then sort by file path for consistency
+
+    # Deduplicate while preserving insertion order (user order for explicit files)
     seen = set()
     unique_paths = []
     for path in resolved:
@@ -136,8 +151,7 @@ def resolve_input_files(paths: list[str]) -> list[Path]:
         if resolved_path not in seen:
             seen.add(resolved_path)
             unique_paths.append(resolved_path)
-            
-    unique_paths.sort(key=lambda x: str(x).lower())
+
     return unique_paths
 
 
@@ -146,8 +160,7 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
     input_str = str(input_path)
     
     if not input_path.exists():
-        print(f"ERROR: File not found: {input_str}", file=sys.stderr)
-        sys.exit(1)
+        raise ExtractionError(f"File not found: {input_str}")
         
     ext = input_path.suffix.lower()
     document_format = ext.lstrip(".")
@@ -170,33 +183,25 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
                         ext = ".docx"
                         document_format = "docx"
                     else:
-                        print(
-                            f"ERROR: Unsupported ZIP-based format '{input_path.name}'. Supported: {supported_formats_message()}",
-                            file=sys.stderr,
+                        raise ExtractionError(
+                            f"Unsupported ZIP-based format '{input_path.name}'. Supported: {supported_formats_message()}"
                         )
-                        sys.exit(1)
             except (zipfile.BadZipFile, KeyError, OSError):
-                print(
-                    f"ERROR: Unsupported ZIP-based format '{input_path.name}'. Supported: {supported_formats_message()}",
-                    file=sys.stderr,
+                raise ExtractionError(
+                    f"Unsupported ZIP-based format '{input_path.name}'. Supported: {supported_formats_message()}"
                 )
-                sys.exit(1)
         else:
-            print(
-                f"ERROR: Unsupported format '{ext or '<none>'}'. Supported: {supported_formats_message()}",
-                file=sys.stderr,
+            raise ExtractionError(
+                f"Unsupported format '{ext or '<none>'}'. Supported: {supported_formats_message()}"
             )
-            sys.exit(1)
             
     prepare_dependencies(ext, extraction_mode, install_mode)
     
     if ext in CALIBRE_EBOOK_EXTENSIONS and not shutil.which("ebook-convert"):
-        print(
+        raise ExtractionError(
             "MOBI/AZW/AZW3 extraction requires Calibre's ebook-convert command. "
-            "Install Calibre and ensure ebook-convert is on PATH, then rerun this command.",
-            file=sys.stderr,
+            "Install Calibre and ensure ebook-convert is on PATH, then rerun this command."
         )
-        sys.exit(1)
         
     text = ""
     method = ""
@@ -205,9 +210,11 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
     
     if ext == ".epub":
         print(f"Extracting EPUB: {input_str}")
-        text, method = extract_with_ebooklib(input_str)
-        if not text or not text.strip():
-            print("not available")
+        text = extract_with_ebooklib(input_str)
+        if text and text.strip():
+            method = "ebooklib"
+        else:
+            print("ebooklib not available")
             print("Trying stdlib zipfile parser...", end=" ", flush=True)
             text = extract_with_zipfile(input_str)
             if text and text.strip():
@@ -215,15 +222,11 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
                 method = "zipfile"
             else:
                 print("FAILED")
-                print(
-                    "\nERROR: Could not extract text from EPUB.\n"
+                raise ExtractionError(
+                    "Could not extract text from EPUB.\n"
                     "Install ebooklib + beautifulsoup4 for best results:\n"
-                    "  pip3 install ebooklib beautifulsoup4",
-                    file=sys.stderr,
+                    "  pip3 install ebooklib beautifulsoup4"
                 )
-                sys.exit(1)
-        else:
-            method = "ebooklib"
         pages = count_epub_chapters(input_str)
         pages_label = "spine_items"
     elif ext == ".pdf":
@@ -262,15 +265,13 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
                         print("OK")
                     else:
                         print("FAILED")
-                        print(
-                            "\nERROR: Could not extract text from PDF.\n"
+                        raise ExtractionError(
+                            "Could not extract text from PDF.\n"
                             "Install one of: poppler-utils (pdftotext), PyPDF2, or pdfminer.six\n"
                             "  sudo apt install poppler-utils\n"
                             "  pip3 install PyPDF2\n"
-                            "  pip3 install pdfminer.six",
-                            file=sys.stderr,
+                            "  pip3 install pdfminer.six"
                         )
-                        sys.exit(1)
                         
         pages = count_pages(input_str)
         pages_label = "pages"
@@ -278,8 +279,7 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
         print(f"Extracting text document: {input_str}")
         text = read_text_file(input_str)
         if text is None or not text.strip():
-            print("ERROR: Could not read text document", file=sys.stderr)
-            sys.exit(1)
+            raise ExtractionError(f"Could not read text document: {input_path.name}")
         method = "plain-text"
         pages = 0
         pages_label = "sections"
@@ -287,8 +287,7 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
         print(f"Extracting HTML: {input_str}")
         text = extract_html_file(input_str)
         if text is None or not text.strip():
-            print("ERROR: Could not extract text from HTML", file=sys.stderr)
-            sys.exit(1)
+            raise ExtractionError(f"Could not extract text from HTML: {input_path.name}")
         method = "html-parser"
         pages = 0
         pages_label = "sections"
@@ -306,11 +305,9 @@ def extract_single_file(input_path: Path, extraction_mode: str, install_mode: st
         print(f"Extracting ebook with Calibre: {input_str}")
         text = extract_with_ebook_convert(input_str)
         if text is None or not text.strip():
-            print(
-                f"ERROR: Could not extract text from {ext}. Install Calibre and ensure ebook-convert is on PATH.",
-                file=sys.stderr,
+            raise ExtractionError(
+                f"Could not extract text from {ext}. Install Calibre and ensure ebook-convert is on PATH."
             )
-            sys.exit(1)
         method = "ebook-convert"
         pages = 0
         pages_label = "sections"
@@ -358,14 +355,26 @@ def main():
     
     extracted_sources = []
     combined_texts = []
+    errors = []
     
     for file_path in input_files:
-        res = extract_single_file(file_path, extraction_mode, install_mode)
+        try:
+            res = extract_single_file(file_path, extraction_mode, install_mode)
+        except ExtractionError as exc:
+            print(f"WARNING: Skipping {file_path.name}: {exc}", file=sys.stderr)
+            errors.append((file_path, str(exc)))
+            continue
         extracted_sources.append(res)
         
         # Format the text with a clear boundary
         separator = f"\n\n{'=' * 80}\nSOURCE: {res['filename']} (Path: {res['source_file']})\n{'=' * 80}\n\n"
         combined_texts.append(separator + res["text"])
+    
+    if not extracted_sources:
+        print(f"\nERROR: All {len(errors)} source(s) failed extraction:", file=sys.stderr)
+        for path, err in errors:
+            print(f"  - {path.name}: {err}", file=sys.stderr)
+        sys.exit(1)
         
     # Combine texts
     consolidated_text = "".join(combined_texts).strip()
@@ -435,3 +444,7 @@ def main():
         )
     print(f"\n   Text -> {OUTPUT_TEXT}")
     print(f"   Meta -> {OUTPUT_META}")
+    if errors:
+        print(f"\n   WARNING: {len(errors)} source(s) skipped due to errors:")
+        for path, err in errors:
+            print(f"     - {path.name}: {err}")
